@@ -220,10 +220,10 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_chunks = hf_inputs.get("audio_num_chunks", torch.zeros(0))
         return dict(
-            # to handle longer than 30s audio, each audio might be split
-            # into multiple chunks as such, their batch dimension can be
-            # higher than the number of audio samples
-            audio_features=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
+            # audio_features uses as_list to handle variable-length mel
+            # spectrograms (different audio durations). The model's
+            # pad_and_concat_to_dim3 handles padding before concatenation.
+            audio_features=MultiModalFieldConfig.as_list("audio"),
             audio_token_len=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
             audio_lens=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
             # num_chunks can convert audio_chunked to audio batch dimension

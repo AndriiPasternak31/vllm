@@ -609,6 +609,38 @@ class MultiModalSharedField(BaseMultiModalField):
         return batch[0]
 
 
+@dataclass(frozen=True, kw_only=True)
+class MultiModalListField(BaseMultiModalField):
+    """
+    Field type that returns batch as a list of tensors without
+    stacking or concatenating.
+
+    Use this when the model needs to handle variable-length inputs
+    itself (e.g., padding before concatenation).
+
+    Info:
+        [`MultiModalFieldConfig.as_list`][vllm.multimodal.inputs.MultiModalFieldConfig.as_list]
+    """
+
+    def build_elems(
+        self,
+        modality: str,
+        key: str,
+        data: NestedTensors,
+    ) -> Sequence[MultiModalFieldElem]:
+        field_factory = self._field_factory(modality=modality, key=key)
+        return [field_factory(item) for item in data]
+
+    def _reduce_data(
+        self,
+        batch: list[NestedTensors],
+        *,
+        pin_memory: bool,
+    ) -> NestedTensors:
+        # Return as list for model to handle variable shapes
+        return batch
+
+
 @dataclass(frozen=True)
 class MultiModalFieldConfig:
     @staticmethod
@@ -816,6 +848,41 @@ class MultiModalFieldConfig:
                 batch_size=batch_size,
                 keep_on_cpu=keep_on_cpu,
             ),
+            modality=modality,
+        )
+
+    @staticmethod
+    def as_list(modality: str, *, keep_on_cpu: bool = False):
+        """
+        Defines a field where the batch is returned as a list of tensors
+        without stacking or concatenating.
+
+        Use this for variable-length data that the model will pad/process
+        itself.
+
+        Args:
+            modality: The modality of the multi-modal item that uses this
+                keyword argument.
+            keep_on_cpu: Whether to keep this field on the CPU for the model
+                inputs.
+
+        Example:
+
+        ```
+        Input:
+            Data: [tensor([80, 325]), tensor([80, 666])]
+
+        Output:
+            [tensor([80, 325]), tensor([80, 666])]  # Returned as-is
+        ```
+
+        Note:
+            Unlike `batched` or `flat`, this field type does not attempt
+            to combine tensors. Use this when tensors have incompatible
+            shapes and the model handles padding/concatenation internally.
+        """
+        return MultiModalFieldConfig(
+            field=MultiModalListField(keep_on_cpu=keep_on_cpu),
             modality=modality,
         )
 
