@@ -587,6 +587,35 @@ class MultiModalFlatField(BaseMultiModalField):
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
 
+            # Shapes don't match on non-concat dimensions (e.g., variable-length
+            # audio). Pad all tensors to max size before concatenating.
+            # This handles cases like Ultravox with different audio durations.
+            import torch.nn.functional as F  # Local import for lazy loading
+
+            ndim = batch[0].ndim
+            max_sizes = [
+                max(t.shape[d] for t in batch) for d in range(ndim)
+            ]
+            padded = []
+            for t in batch:
+                # F.pad expects padding in reverse dimension order
+                pad_widths: list[int] = []
+                for d in range(ndim - 1, -1, -1):
+                    pad_widths.extend([0, max_sizes[d] - t.shape[d]])
+                if any(p > 0 for p in pad_widths):
+                    padded.append(F.pad(t, pad_widths))
+                else:
+                    padded.append(t)
+            shape_before, shape_after = _shape_before_after(padded[0])
+            shape_concat = sum(item.shape[dim] for item in padded)
+            out = torch.empty(
+                (*shape_before, shape_concat, *shape_after),
+                dtype=padded[0].dtype,
+                device=padded[0].device,
+                pin_memory=pin_memory,
+            )
+            return torch.concat(padded, dim=self.dim, out=out)
+
         assert self.dim == 0, "dim == 0 is required for nested list"
         return [e for elem in batch for e in elem]
 
@@ -616,6 +645,40 @@ class MultiModalSharedField(BaseMultiModalField):
         pin_memory: bool,
     ) -> NestedTensors:
         return batch[0]
+
+
+@dataclass(frozen=True, kw_only=True)
+class MultiModalListField(BaseMultiModalField):
+    """
+    Field type that returns batch as a list of tensors without
+    stacking or concatenating.
+
+    Use this when the model needs to handle variable-length inputs
+    itself (e.g., padding before concatenation).
+
+    Info:
+        [`MultiModalFieldConfig.as_list`][vllm.multimodal.inputs.MultiModalFieldConfig.as_list]
+    """
+
+    def build_elems(
+        self,
+        modality: str,
+        key: str,
+        data: NestedTensors,
+    ) -> Sequence[MultiModalFieldElem]:
+        field_factory = self._field_factory(modality=modality, key=key)
+        # Create a single element containing all the data
+        # The list behavior is only in _reduce_data during batching
+        return [field_factory(data)]
+
+    def _reduce_data(
+        self,
+        batch: list[NestedTensors],
+        *,
+        pin_memory: bool,
+    ) -> NestedTensors:
+        # Return as list for model to handle variable shapes
+        return batch
 
 
 @dataclass(frozen=True)
@@ -825,6 +888,37 @@ class MultiModalFieldConfig:
                 batch_size=batch_size,
                 keep_on_cpu=keep_on_cpu,
             ),
+            modality=modality,
+        )
+
+    @staticmethod
+    def as_list(modality: str, *, keep_on_cpu: bool = False):
+        """
+        Defines a field where the batch is returned as a list of tensors
+        without stacking or concatenating.
+
+        Use this for variable-length data that the model will pad/process.
+
+        Args:
+            modality: The modality of the multi-modal item that uses this
+                keyword argument.
+            keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
+
+        Example:
+
+        ```
+        Input:
+            Data: [tensor([80, 325]), tensor([80, 666])]
+
+        Output:
+            [tensor([80, 325]), tensor([80, 666])]
+        ```
+
+        Info:
+            [`MultiModalListField`][vllm.multimodal.inputs.MultiModalListField]
+        """
+        return MultiModalFieldConfig(
+            field=MultiModalListField(keep_on_cpu=keep_on_cpu),
             modality=modality,
         )
 
