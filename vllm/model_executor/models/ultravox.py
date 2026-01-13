@@ -7,7 +7,7 @@
 import copy
 from collections.abc import Iterable, Mapping, Sequence
 from types import SimpleNamespace
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias, TypedDict
 
 import torch
 from torch import nn
@@ -63,33 +63,45 @@ _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
 
 
-class UltravoxAudioFeatureInputs(TensorSchema):
+class UltravoxAudioFeatureInputs(TypedDict):
     """
-    Dimensions:
-    - b: batch size
-    - n: number of chunks
+    Audio feature inputs for Ultravox model.
+
+    NOTE: This class uses TypedDict instead of TensorSchema to avoid strict
+    dimension validation issues that occur when audio is chunked across multiple
+    requests with different chunk counts. The TensorSchema validation incorrectly
+    assumes all tensors with dimension "bn" must have the same size, but when
+    audio > 30 seconds is chunked, the actual number of chunks can vary per
+    request, causing dimension mismatches during batching.
+
+    See: https://github.com/vllm-project/vllm/issues/31658
+
+    Dimensions (informational, not enforced):
+    - bn: total number of audio chunks across all requests in batch
+    - n: number of audio samples (requests with audio)
     - t: Time frames (M)
     - nmb: Number of mel bins
     """
 
     type: Literal["audio_features"]
-    data: Annotated[
-        torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]],
-        TensorShape("bn", "nmb", "t"),
-    ]
-    lens: Annotated[torch.Tensor, TensorShape("bn")]
-    """
-    Length of the audio frames per chunk. Used for attention mask in WhisperEncoder.
-    """
-    token_len: Annotated[torch.Tensor, TensorShape("bn")]
-    """Length of the audio tokens per chunk. Used for flattening the audio features."""
-    num_chunks: Annotated[torch.Tensor, TensorShape("n")]
-    """Number of chunks per audio. Used for flattening the audio features."""
+    data: torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]]
+    """Audio features with shape (bn, nmb, t)"""
+    lens: torch.Tensor
+    """Length of the audio frames per chunk. Shape (bn,). Used for attention mask in WhisperEncoder."""
+    token_len: torch.Tensor
+    """Length of the audio tokens per chunk. Shape (bn,). Used for flattening the audio features."""
+    num_chunks: torch.Tensor
+    """Number of chunks per audio. Shape (n,). Used for flattening the audio features."""
 
 
-class UltravoxAudioEmbeddingInputs(TensorSchema):
+class UltravoxAudioEmbeddingInputs(TypedDict):
     """
-    Dimensions:
+    Audio embedding inputs for Ultravox model.
+
+    NOTE: This class uses TypedDict instead of TensorSchema for consistency
+    with UltravoxAudioFeatureInputs and to avoid dimension validation issues.
+
+    Dimensions (informational, not enforced):
     - b: batch size
     - na: number of audios
     - afs: audio feature size
@@ -97,9 +109,8 @@ class UltravoxAudioEmbeddingInputs(TensorSchema):
     """
 
     type: Literal["audio_embeds"]
-    data: Annotated[
-        torch.Tensor | list[torch.Tensor], TensorShape("b", "na", "afs", "hs")
-    ]
+    data: torch.Tensor | list[torch.Tensor]
+    """Audio embeddings with shape (b, na, afs, hs)"""
 
 
 UltravoxAudioInputs: TypeAlias = (
