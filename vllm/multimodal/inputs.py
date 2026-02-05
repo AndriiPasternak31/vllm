@@ -20,6 +20,7 @@ from typing import (
 )
 
 import numpy as np
+from PIL.Image import Image
 from typing_extensions import NotRequired, TypeVar
 
 from vllm.utils.collection_utils import full_groupby, is_list_of
@@ -29,12 +30,9 @@ from vllm.utils.jsontree import json_map_leaves
 if TYPE_CHECKING:
     import torch
     import torch.types
-    from PIL.Image import Image
     from transformers.feature_extraction_utils import BatchFeature
 
-    from .base import MediaWithBytes
-    from .processing import MultiModalHashes
-
+    from .media import MediaWithBytes
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -107,6 +105,28 @@ The number of data items allowed per modality is restricted by
 """
 
 
+class VisionChunkImage(TypedDict):
+    """Represents an image wrapped as a vision chunk."""
+
+    type: Literal["image"]
+    image: Image
+    uuid: str | None
+
+
+class VisionChunkVideo(TypedDict):
+    """Represents a video chunk with metadata."""
+
+    type: Literal["video_chunk"]
+    video_chunk: list[Image]
+    uuid: str | None
+    prompt: str
+    video_idx: int
+
+
+VisionChunk = VisionChunkImage | VisionChunkVideo
+"""A vision chunk is either an image or a video chunk."""
+
+
 @final
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Type annotations for modality types predefined by vLLM."""
@@ -119,6 +139,9 @@ class MultiModalDataBuiltins(TypedDict, total=False):
 
     audio: ModalityData[AudioItem]
     """The input audio(s)."""
+
+    vision_chunk: ModalityData[VisionChunk]
+    """The input visual atom(s) - unified modality for images and video chunks."""
 
 
 MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
@@ -329,6 +352,9 @@ class MultiModalFeatureSpec:
 
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
+
+    mm_hash: str | None = None
+    """Base mm_hash for processor cache (without LoRA prefix)."""
 
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
@@ -577,6 +603,47 @@ class MultiModalFlatField(BaseMultiModalField):
                     pin_memory=pin_memory,
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
+
+            # Variable-length case: non-concat dimensions differ
+            # (e.g., Ultravox with different audio durations).
+            # Use slice-assign approach (more efficient than padding).
+            # See: https://github.com/vllm-project/vllm/issues/31658
+
+            ndim = batch[0].ndim
+
+            # Step 1: Compute output shape
+            # - Non-concat dims: take max across batch
+            # - Concat dim: sum across batch
+            max_sizes: list[int] = []
+            for d in range(ndim):
+                if d == dim:
+                    max_sizes.append(sum(t.shape[d] for t in batch))
+                else:
+                    max_sizes.append(max(t.shape[d] for t in batch))
+
+            # Step 2: Create zero-initialized output tensor
+            out = torch.zeros(
+                max_sizes,
+                dtype=batch[0].dtype,
+                device=batch[0].device,
+                pin_memory=pin_memory,
+            )
+
+            # Step 3: Slice-assign each tensor to its proper position
+            concat_offset = 0
+            for tensor in batch:
+                slices: list[slice] = []
+                for d in range(ndim):
+                    if d == dim:
+                        slices.append(
+                            slice(concat_offset, concat_offset + tensor.shape[d])
+                        )
+                    else:
+                        slices.append(slice(0, tensor.shape[d]))
+                out[tuple(slices)] = tensor
+                concat_offset += tensor.shape[dim]
+
+            return out
 
         assert self.dim == 0, "dim == 0 is required for nested list"
         return [e for elem in batch for e in elem]
@@ -976,9 +1043,15 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
+MultiModalHashes = dict[str, list[str]]
+"""
+A dictionary containing per-item hashes for each modality.
+"""
+
+
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
 """
-A dictionary containing placeholder ranges for each modality.
+A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
@@ -998,10 +1071,10 @@ class MultiModalInputs(TypedDict):
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: "MultiModalHashes"
+    mm_hashes: MultiModalHashes
     """The hashes of the multi-modal data."""
 
-    mm_placeholders: "MultiModalPlaceholderDict"
+    mm_placeholders: MultiModalPlaceholderDict
     """
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.

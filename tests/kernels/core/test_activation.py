@@ -45,6 +45,7 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 e
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_act_and_mul(
+    default_vllm_config,
     activation: str,
     num_tokens: int,
     d: int,
@@ -56,7 +57,7 @@ def test_act_and_mul(
     torch.set_default_device(device)
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
     if activation == "silu_and_mul":
-        layer = SiluAndMul()
+        layer = SiluAndMul(compile_native=False)
         fn = torch.ops._C.silu_and_mul
     if activation == "mul_and_silu":
         layer = MulAndSilu()
@@ -122,6 +123,7 @@ def test_act_and_mul(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_activation(
+    default_vllm_config,
     activation: type[torch.nn.Module],
     num_tokens: int,
     d: int,
